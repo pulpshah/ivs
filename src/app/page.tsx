@@ -1,101 +1,322 @@
-import Image from "next/image";
+"use client";
+
+import { useEffect, useRef, useState } from "react";
+import IVSBroadcastClient, {
+  Errors,
+  BASIC_LANDSCAPE,
+} from "amazon-ivs-web-broadcast";
 
 export default function Home() {
-  return (
-    <div className="grid grid-rows-[20px_1fr_20px] items-center justify-items-center min-h-screen p-8 pb-20 gap-16 sm:p-20 font-[family-name:var(--font-geist-sans)]">
-      <main className="flex flex-col gap-8 row-start-2 items-center sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={180}
-          height={38}
-          priority
-        />
-        <ol className="list-inside list-decimal text-sm text-center sm:text-left font-[family-name:var(--font-geist-mono)]">
-          <li className="mb-2">
-            Get started by editing{" "}
-            <code className="bg-black/[.05] dark:bg-white/[.06] px-1 py-0.5 rounded font-semibold">
-              src/app/page.tsx
-            </code>
-            .
-          </li>
-          <li>Save and see your changes instantly.</li>
-        </ol>
+  const [client, setClient] = useState<any>(null);
+  const [isBroadcasting, setIsBroadcasting] = useState(false);
+  const [isScreenSharing, setIsScreenSharing] = useState(false);
+  const [devices, setDevices] = useState<{
+    video: MediaDeviceInfo[];
+    audio: MediaDeviceInfo[];
+  }>({
+    video: [],
+    audio: [],
+  });
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const [layout, setLayout] = useState<"pip" | "side-by-side">("pip");
 
-        <div className="flex gap-4 items-center flex-col sm:flex-row">
-          <a
-            className="rounded-full border border-solid border-transparent transition-colors flex items-center justify-center bg-foreground text-background gap-2 hover:bg-[#383838] dark:hover:bg-[#ccc] text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
+  useEffect(() => {
+    // Initialize IVS client
+    const ivsClient = IVSBroadcastClient.create({
+      streamConfig: IVSBroadcastClient.BASIC_LANDSCAPE,
+      ingestEndpoint:
+        "rtmps://c7a468ff1fce.global-contribute.live-video.net:443/app/",
+    });
+    setClient(ivsClient);
+
+    // Get available devices
+    const getDevices = async () => {
+      try {
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        setDevices({
+          video: devices.filter((d) => d.kind === "videoinput"),
+          audio: devices.filter((d) => d.kind === "audioinput"),
+        });
+      } catch (err) {
+        console.error("Error getting devices:", err);
+      }
+    };
+    getDevices();
+  }, []);
+
+  useEffect(() => {
+    if (client && canvasRef.current) {
+      client.attachPreview(canvasRef.current);
+    }
+  }, [client]);
+
+  const handlePermissions = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: true,
+        audio: true,
+      });
+
+      // Add camera to broadcast
+      if (client) {
+        client.addVideoInputDevice(stream, "camera1", {
+          index: 0,
+          position:
+            layout === "pip"
+              ? {
+                  width: 0.25,
+                  height: 0.25,
+                  x: 0.7,
+                  y: 0.7,
+                }
+              : {
+                  width: 0.5,
+                  height: 1,
+                  x: 0,
+                  y: 0,
+                },
+        });
+        client.addAudioInputDevice(stream, "mic1");
+      }
+
+      return true;
+    } catch (err) {
+      console.error("Failed to get permissions:", err);
+      return false;
+    }
+  };
+
+  const toggleScreenShare = async () => {
+    try {
+      if (!isScreenSharing) {
+        const screenStream = await navigator.mediaDevices.getDisplayMedia({
+          video: true,
+          audio: true,
+        });
+
+        if (client) {
+          // Add video track
+          client.addVideoInputDevice(screenStream, "screen1", {
+            index: 1,
+            position:
+              layout === "pip"
+                ? {
+                    width: 1,
+                    height: 1,
+                    x: 0,
+                    y: 0,
+                  }
+                : {
+                    width: 0.5,
+                    height: 1,
+                    x: 0.5,
+                    y: 0,
+                  },
+          });
+
+          // Add audio track if it exists
+          const audioTrack = screenStream.getAudioTracks()[0];
+          if (audioTrack) {
+            const audioStream = new MediaStream([audioTrack]);
+            client.addAudioInputDevice(audioStream, "screen-audio");
+          }
+        }
+        setIsScreenSharing(true);
+
+        // Handle the case when user stops sharing through the browser's UI
+        screenStream.getVideoTracks()[0].onended = () => {
+          if (client) {
+            client.removeVideoInputDevice("screen1");
+            try {
+              // Try to get the audio device before removing
+              const audioDevice = client.getAudioInputDevice("screen-audio");
+              if (audioDevice) {
+                client.removeAudioInputDevice("screen-audio");
+              }
+            } catch (err) {
+              // Ignore error if audio device doesn't exist
+              console.log("No screen audio device to remove");
+            }
+          }
+          setIsScreenSharing(false);
+        };
+      } else {
+        if (client) {
+          client.removeVideoInputDevice("screen1");
+          try {
+            // Try to get the audio device before removing
+            const audioDevice = client.getAudioInputDevice("screen-audio");
+            if (audioDevice) {
+              client.removeAudioInputDevice("screen-audio");
+            }
+          } catch (err) {
+            // Ignore error if audio device doesn't exist
+            console.log("No screen audio device to remove");
+          }
+        }
+        setIsScreenSharing(false);
+      }
+    } catch (err) {
+      console.error("Failed to toggle screen share:", err);
+      setIsScreenSharing(false);
+    }
+  };
+
+  const toggleLayout = () => {
+    const newLayout = layout === "pip" ? "side-by-side" : "pip";
+    setLayout(newLayout);
+
+    // Update positions of existing streams
+    if (client) {
+      const cameraDevice = client.getVideoInputDevice("camera1");
+      const screenDevice = client.getVideoInputDevice("screen1");
+
+      if (cameraDevice) {
+        client.updateVideoDeviceComposition("camera1", {
+          index: 0,
+          position:
+            newLayout === "pip"
+              ? {
+                  width: 0.25,
+                  height: 0.25,
+                  x: 0.7,
+                  y: 0.7,
+                }
+              : {
+                  width: 0.5,
+                  height: 1,
+                  x: 0,
+                  y: 0,
+                },
+        });
+      }
+
+      if (screenDevice) {
+        client.updateVideoDeviceComposition("screen1", {
+          index: 1,
+          position:
+            newLayout === "pip"
+              ? {
+                  width: 1,
+                  height: 1,
+                  x: 0,
+                  y: 0,
+                }
+              : {
+                  width: 0.5,
+                  height: 1,
+                  x: 0.5,
+                  y: 0,
+                },
+        });
+      }
+    }
+  };
+
+  const startBroadcast = async () => {
+    try {
+      const hasPermissions = await handlePermissions();
+      if (!hasPermissions) return;
+
+      const streamKey =
+        "sk_us-east-1_NdHothZrG1a1_lBzSlBpHqbTRyS9ZwyJhZ4xASXi0Xt";
+      await client.startBroadcast(streamKey);
+      setIsBroadcasting(true);
+    } catch (err) {
+      console.error("Failed to start broadcast:", err);
+    }
+  };
+
+  const stopBroadcast = () => {
+    try {
+      client.stopBroadcast();
+      setIsBroadcasting(false);
+      setIsScreenSharing(false);
+    } catch (err) {
+      console.error("Failed to stop broadcast:", err);
+    }
+  };
+
+  return (
+    <div className="flex flex-col items-center min-h-screen p-8">
+      <h1 className="text-2xl font-bold mb-8">IVS Broadcast Room</h1>
+
+      <div className="mb-8">
+        <canvas
+          ref={canvasRef}
+          className="border border-gray-300 rounded-lg"
+          width={1280}
+          height={720}
+        />
+      </div>
+
+      <div className="flex gap-4 mb-4">
+        {!isBroadcasting ? (
+          <button
+            onClick={startBroadcast}
+            className="bg-blue-500 hover:bg-blue-600 text-white px-6 py-2 rounded-lg"
           >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={20}
-              height={20}
-            />
-            Deploy now
-          </a>
-          <a
-            className="rounded-full border border-solid border-black/[.08] dark:border-white/[.145] transition-colors flex items-center justify-center hover:bg-[#f2f2f2] dark:hover:bg-[#1a1a1a] hover:border-transparent text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5 sm:min-w-44"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
+            Start Broadcasting
+          </button>
+        ) : (
+          <button
+            onClick={stopBroadcast}
+            className="bg-red-500 hover:bg-red-600 text-white px-6 py-2 rounded-lg"
           >
-            Read our docs
-          </a>
+            Stop Broadcasting
+          </button>
+        )}
+
+        {isBroadcasting && (
+          <>
+            <button
+              onClick={toggleScreenShare}
+              className={`${
+                isScreenSharing
+                  ? "bg-purple-500 hover:bg-purple-600"
+                  : "bg-green-500 hover:bg-green-600"
+              } text-white px-6 py-2 rounded-lg`}
+            >
+              {isScreenSharing ? "Stop Screen Share" : "Share Screen"}
+            </button>
+
+            <button
+              onClick={toggleLayout}
+              className="bg-gray-500 hover:bg-gray-600 text-white px-6 py-2 rounded-lg"
+            >
+              {layout === "pip" ? "Switch to Side by Side" : "Switch to PiP"}
+            </button>
+          </>
+        )}
+      </div>
+
+      <div className="mt-8">
+        <h2 className="text-xl font-semibold mb-4">Available Devices</h2>
+        <div className="grid grid-cols-2 gap-8">
+          <div>
+            <h3 className="font-medium mb-2">Video Devices</h3>
+            <ul className="list-disc pl-5">
+              {devices.video.map((device) => (
+                <li key={device.deviceId}>
+                  {device.label ||
+                    `Video Device ${device.deviceId.slice(0, 8)}`}
+                </li>
+              ))}
+            </ul>
+          </div>
+          <div>
+            <h3 className="font-medium mb-2">Audio Devices</h3>
+            <ul className="list-disc pl-5">
+              {devices.audio.map((device) => (
+                <li key={device.deviceId}>
+                  {device.label ||
+                    `Audio Device ${device.deviceId.slice(0, 8)}`}
+                </li>
+              ))}
+            </ul>
+          </div>
         </div>
-      </main>
-      <footer className="row-start-3 flex gap-6 flex-wrap items-center justify-center">
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/file.svg"
-            alt="File icon"
-            width={16}
-            height={16}
-          />
-          Learn
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/window.svg"
-            alt="Window icon"
-            width={16}
-            height={16}
-          />
-          Examples
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/globe.svg"
-            alt="Globe icon"
-            width={16}
-            height={16}
-          />
-          Go to nextjs.org →
-        </a>
-      </footer>
+      </div>
     </div>
   );
 }
